@@ -440,6 +440,13 @@ export default function Home() {
   const handleStartChat = async () => {
     if (!inputMessage.trim()) return;
 
+    // Check if user is authenticated
+    if (!user) {
+      setAuthMode("signin");
+      setShowAuthModal(true);
+      return;
+    }
+
     setIsInChat(true);
     setShouldAutoScroll(true); // Enable auto-scroll when starting chat
 
@@ -700,6 +707,13 @@ export default function Home() {
   const handleSendMessage = async () => {
     if (!inputMessage.trim() || isLoading) return;
 
+    // Check if user is authenticated
+    if (!user) {
+      setAuthMode("signin");
+      setShowAuthModal(true);
+      return;
+    }
+
     const userMessage: Message = {
       id: Date.now().toString(),
       role: "user",
@@ -829,6 +843,14 @@ export default function Home() {
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
+
+      // Check if user is authenticated
+      if (!user) {
+        setAuthMode("signin");
+        setShowAuthModal(true);
+        return;
+      }
+
       if (!isInChat) {
         handleStartChat();
       } else {
@@ -992,6 +1014,13 @@ export default function Home() {
   };
 
   const handlePromptClick = async (promptText: string) => {
+    // Check if user is authenticated
+    if (!user) {
+      setAuthMode("signin");
+      setShowAuthModal(true);
+      return;
+    }
+
     setClickedPrompt(promptText);
     setIsInChat(true);
     setInputMessage(promptText); // Set the input message to show the clicked prompt
@@ -1378,7 +1407,7 @@ export default function Home() {
       )}
 
       {/* Main Content */}
-      <div className="lg:ml-80 flex flex-col min-h-screen">
+      <div className={`${user ? "lg:ml-80" : ""} flex flex-col min-h-screen`}>
         {/* Header */}
         <div className="flex items-center justify-between px-3 sm:px-4 py-3 sm:py-4 border-b bg-white sticky top-0 z-10">
           <div className="flex items-center space-x-2 sm:space-x-3">
