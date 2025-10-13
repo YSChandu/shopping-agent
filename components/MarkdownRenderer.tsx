@@ -9,6 +9,26 @@ interface MarkdownRendererProps {
   content: string;
 }
 
+// Helper function to extract text from React elements recursively
+function extractTextFromReactElement(element: unknown): string {
+  if (typeof element === "string") return element;
+  if (typeof element === "number") return String(element);
+  if (!element) return "";
+
+  if (Array.isArray(element)) {
+    return element.map(extractTextFromReactElement).join("");
+  }
+
+  if (typeof element === "object" && element !== null && "props" in element) {
+    const reactElement = element as { props?: { children?: unknown } };
+    if (reactElement.props?.children) {
+      return extractTextFromReactElement(reactElement.props.children);
+    }
+  }
+
+  return "";
+}
+
 export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
   // Pre-process the content to handle custom tags and group multiple dot tags
   let processedContent = content;
@@ -18,14 +38,30 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
   const dotMatches = [...content.matchAll(dotTagRegex)];
 
   if (dotMatches.length > 0) {
-    // Replace all dot tags with a special marker that we'll process later
-    processedContent = processedContent.replace(
-      dotTagRegex,
-      (match, innerContent) => {
-        return `\n\n**DOT_TAG_START**${innerContent.trim()}**DOT_TAG_END**\n\n`;
-      }
-    );
+    // Check if this is a "Key Specs:" section with multiple specs
+    const hasKeySpecs =
+      content.includes("**Key Specs:**") || content.includes("Key Specs:");
+
+    if (hasKeySpecs) {
+      // Mark specs as special for blue box styling
+      processedContent = processedContent.replace(
+        dotTagRegex,
+        (match, innerContent) => {
+          return `\n\n@@@SPEC_TAG_START@@@${innerContent.trim()}@@@SPEC_TAG_END@@@\n\n`;
+        }
+      );
+    } else {
+      // Regular dot tags
+      processedContent = processedContent.replace(
+        dotTagRegex,
+        (match, innerContent) => {
+          return `\n\n@@@DOT_TAG_START@@@${innerContent.trim()}@@@DOT_TAG_END@@@\n\n`;
+        }
+      );
+    }
   }
+
+  // Don't preprocess @@@DOT_TAG_START@@@ and @@@DOT_TAG_END@@@ markers - let the paragraph component handle them directly
 
   // Handle number tags
   processedContent = processedContent.replace(
@@ -115,15 +151,16 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
           },
           p: ({ children }) => {
             // Check if this paragraph contains phone data that needs reformatting
-            const childrenString =
-              typeof children === "string"
-                ? children
-                : Array.isArray(children)
-                ? children.join("")
-                : String(children);
+            // Properly convert React elements to strings
+            const childrenString = extractTextFromReactElement(children);
 
             // Check if it contains our custom tag markers
-            const hasDotTag = childrenString.includes("**DOT_TAG_START**");
+            const hasSpecTag =
+              childrenString.includes("@@@SPEC_TAG_START@@@") &&
+              childrenString.includes("@@@SPEC_TAG_END@@@");
+            const hasDotTag =
+              childrenString.includes("@@@DOT_TAG_START@@@") &&
+              childrenString.includes("@@@DOT_TAG_END@@@");
             const hasNumberTag = childrenString.includes(
               "**NUMBER_TAG_START**"
             );
@@ -146,11 +183,56 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
                 childrenString.includes("best choice") ||
                 childrenString.includes("go with"));
 
-            if (hasDotTag) {
-              const content = childrenString.replace(
-                /\*\*DOT_TAG_START\*\*(.*?)\*\*DOT_TAG_END\*\*/g,
-                "$1"
+            // Handle Key Specs with blue box styling
+            if (hasSpecTag) {
+              const content = childrenString
+                .replace(/@@@SPEC_TAG_START@@@(.*?)@@@SPEC_TAG_END@@@/g, "$1")
+                .trim();
+
+              // Check if this is a spec item (has colon)
+              if (content.includes(":")) {
+                const colonIndex = content.indexOf(":");
+                const spec = content.substring(0, colonIndex).trim();
+                const value = content.substring(colonIndex + 1).trim();
+
+                return (
+                  <div className="mb-1.5 sm:mb-2">
+                    <div className="flex items-start p-2 sm:p-2.5 bg-blue-50 rounded-lg border border-blue-200">
+                      <span className="mr-2 text-blue-600 font-bold text-xs sm:text-sm flex-shrink-0 mt-0.5">
+                        •
+                      </span>
+                      <div className="flex-1">
+                        <span className="font-semibold text-blue-800 text-xs sm:text-sm">
+                          {spec}:
+                        </span>
+                        <span className="text-blue-700 text-xs sm:text-sm ml-1 break-words">
+                          {value}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              }
+
+              // If no colon, render as regular spec item
+              return (
+                <div className="mb-1.5 sm:mb-2">
+                  <div className="flex items-start p-2 sm:p-2.5 bg-blue-50 rounded-lg border border-blue-200">
+                    <span className="mr-2 text-blue-600 font-bold text-xs sm:text-sm">
+                      •
+                    </span>
+                    <span className="flex-1 text-xs sm:text-sm text-blue-700">
+                      {content}
+                    </span>
+                  </div>
+                </div>
               );
+            }
+
+            if (hasDotTag) {
+              const content = childrenString
+                .replace(/@@@DOT_TAG_START@@@(.*?)@@@DOT_TAG_END@@@/g, "$1")
+                .trim();
 
               // Check if this is a phone recommendation with specs
               const isPhoneRecommendation =
@@ -241,11 +323,53 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
 
             // Also handle cases where markers appear as literal text (fallback)
             if (
-              childrenString.includes("DOT_TAG_START") &&
-              childrenString.includes("DOT_TAG_END")
+              childrenString.includes("@@@DOT_TAG_START@@@") &&
+              childrenString.includes("@@@DOT_TAG_END@@@")
             ) {
               const content = childrenString.replace(
-                /DOT_TAG_START\*\*\*\*(.*?)DOT_TAG_END/g,
+                /@@@DOT_TAG_START@@@(.*?)@@@DOT_TAG_END@@@/g,
+                "$1"
+              );
+              return (
+                <div className="flex items-start mb-1.5 sm:mb-2">
+                  <span className="mr-2 mt-1 text-blue-600 font-bold text-xs sm:text-sm">
+                    •
+                  </span>
+                  <span className="flex-1 text-xs sm:text-sm md:text-base text-gray-800">
+                    {content}
+                  </span>
+                </div>
+              );
+            }
+
+            // Handle cases where DOT_TAG_START appears without DOT_TAG_END (partial matches)
+            if (
+              childrenString.includes("@@@DOT_TAG_START@@@") &&
+              !childrenString.includes("@@@DOT_TAG_END@@@")
+            ) {
+              const content = childrenString.replace(
+                /@@@DOT_TAG_START@@@(.*)/g,
+                "$1"
+              );
+              return (
+                <div className="flex items-start mb-1.5 sm:mb-2">
+                  <span className="mr-2 mt-1 text-blue-600 font-bold text-xs sm:text-sm">
+                    •
+                  </span>
+                  <span className="flex-1 text-xs sm:text-sm md:text-base text-gray-800">
+                    {content}
+                  </span>
+                </div>
+              );
+            }
+
+            // Handle cases where DOT_TAG_END appears without DOT_TAG_START (partial matches)
+            if (
+              childrenString.includes("@@@DOT_TAG_END@@@") &&
+              !childrenString.includes("@@@DOT_TAG_START@@@")
+            ) {
+              const content = childrenString.replace(
+                /(.*?)@@@DOT_TAG_END@@@/g,
                 "$1"
               );
               return (
@@ -282,29 +406,21 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
             }
 
             if (isPhoneData) {
-              // Clean the string to remove [object Object] and other object references
-              const cleanString = childrenString
-                .replace(/\[object Object\]/g, "")
-                .trim();
-
               // Handle both pipe-separated and line-break-separated formats
               let lines: string[];
-              if (cleanString.includes("|")) {
+              if (childrenString.includes("|")) {
                 // Pipe-separated format
-                lines = cleanString
+                lines = childrenString
                   .split("|")
                   .map((line) => line.trim())
-                  .filter((line) => line && line !== "[object Object]")
+                  .filter((line) => line)
                   .slice(0, 8); // Limit to 8 specifications
               } else {
                 // Line-break-separated format
-                lines = cleanString
+                lines = childrenString
                   .split("\n")
                   .map((line) => line.trim())
-                  .filter(
-                    (line) =>
-                      line && line !== "[object Object]" && line.includes(":")
-                  )
+                  .filter((line) => line && line.includes(":"))
                   .slice(0, 8); // Limit to 8 specifications
               }
 
@@ -531,19 +647,8 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
                         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-1.5 sm:gap-2 min-w-[280px] sm:min-w-[400px]">
                           {Array.isArray(children) ? (
                             children.slice(0, 8).map((child, index) => {
-                              let childText =
-                                typeof child === "string"
-                                  ? child
-                                  : child &&
-                                    typeof child === "object" &&
-                                    "props" in child
-                                  ? child.props?.children?.toString() || ""
-                                  : "";
-
-                              // Clean any [object Object] references
-                              childText = childText
-                                .replace(/\[object Object\]/g, "")
-                                .trim();
+                              const childText =
+                                extractTextFromReactElement(child).trim();
 
                               return (
                                 <div
@@ -559,9 +664,7 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
                           ) : (
                             <div className="flex items-start p-1.5 sm:p-2 md:p-2.5 bg-white rounded border border-blue-100 min-w-[250px] sm:min-w-[180px]">
                               <span className="font-medium text-blue-800 text-xs sm:text-sm md:text-base break-words leading-relaxed">
-                                {String(children)
-                                  .replace(/\[object Object\]/g, "")
-                                  .trim()}
+                                {extractTextFromReactElement(children).trim()}
                               </span>
                             </div>
                           )}
@@ -587,19 +690,8 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
                       <div className="bg-white min-w-[320px] sm:min-w-[400px]">
                         {Array.isArray(children) ? (
                           children.slice(0, 8).map((child, index) => {
-                            let childText =
-                              typeof child === "string"
-                                ? child
-                                : child &&
-                                  typeof child === "object" &&
-                                  "props" in child
-                                ? child.props?.children?.toString() || ""
-                                : "";
-
-                            // Clean any [object Object] references
-                            childText = childText
-                              .replace(/\[object Object\]/g, "")
-                              .trim();
+                            const childText =
+                              extractTextFromReactElement(child).trim();
 
                             const [key, ...valueParts] = childText.split(":");
                             const value = valueParts.join(":").trim();
@@ -633,9 +725,7 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
                               Specification
                             </div>
                             <div className="text-xs sm:text-sm text-blue-800 break-words">
-                              {String(children)
-                                .replace(/\[object Object\]/g, "")
-                                .trim()}
+                              {extractTextFromReactElement(children).trim()}
                             </div>
                           </div>
                         )}

@@ -2,10 +2,34 @@ import { supabase } from "../lib/supabase";
 import { Phone } from "../types";
 import { GoogleGenAI } from "@google/genai";
 
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  timestamp?: number;
+}
+
 export interface QueryResult {
   phones: Phone[];
   query: string;
   queryDescription: string;
+  isVague?: boolean;
+  followUpSuggestions?: string[];
+  totalResults?: number;
+}
+
+export interface MultipleQueryResult {
+  phones: Phone[];
+  queries: Array<{
+    queryString: string;
+    phonesFound: number;
+  }>;
+  totalResults: number;
+  isVague?: boolean;
+  isAdversarial?: boolean;
+  isIrrelevant?: boolean;
+  followUpSuggestions?: string[];
+  extractedValues?: string[]; // Add extracted database values
 }
 
 class QueryService {
@@ -18,43 +42,205 @@ class QueryService {
     }
     this.genAI = new GoogleGenAI({ apiKey });
   }
-  async generateAndExecuteQuery(userQuery: string): Promise<QueryResult> {
+
+  // Extract database queryable values from chat history and current query
+  private extractDatabaseQueryValues(
+    userQuery: string,
+    chatHistory?: ChatMessage[]
+  ): string[] {
+    const values: string[] = [];
+    const allText = chatHistory
+      ? [...chatHistory.map((msg) => msg.content), userQuery].join(" ")
+      : userQuery;
+
+    // Extract price values (under, below, less than, max, budget)
+    const priceMatches = allText.match(
+      /(?:under|below|less than|max|budget|upto|up to)\s*(?:₹|rs\.?|rupees?)?\s*(\d+(?:,\d{3})*(?:k|thousand)?)/gi
+    );
+    if (priceMatches) {
+      priceMatches.forEach((match) => {
+        const price = match.match(/(\d+(?:,\d{3})*(?:k|thousand)?)/i)?.[1];
+        if (price) {
+          const numericPrice = price.includes("k")
+            ? parseInt(price.replace(/[,\s]/g, "")) * 1000
+            : parseInt(price.replace(/[,\s]/g, ""));
+          if (numericPrice > 0) values.push(`price <= ${numericPrice}`);
+        }
+      });
+    }
+
+    // Extract brand values
+    const brands = [
+      "samsung",
+      "apple",
+      "iphone",
+      "oneplus",
+      "xiaomi",
+      "redmi",
+      "realme",
+      "oppo",
+      "vivo",
+      "google",
+      "pixel",
+      "motorola",
+      "nokia",
+    ];
+    brands.forEach((brand) => {
+      if (allText.toLowerCase().includes(brand)) {
+        values.push(`brand = ${brand}`);
+      }
+    });
+
+    // Extract RAM values
+    const ramMatches = allText.match(
+      /(\d+)\s*(?:gb|gigabytes?)\s*(?:ram|memory)/gi
+    );
+    if (ramMatches) {
+      ramMatches.forEach((match) => {
+        const ram = match.match(/(\d+)/)?.[1];
+        if (ram) values.push(`ram = ${ram}GB`);
+      });
+    }
+
+    // Extract storage values
+    const storageMatches = allText.match(
+      /(\d+)\s*(?:gb|tb|gigabytes?|terabytes?)\s*(?:storage|memory)/gi
+    );
+    if (storageMatches) {
+      storageMatches.forEach((match) => {
+        const storage = match.match(/(\d+)/)?.[1];
+        if (storage) values.push(`storage = ${storage}GB`);
+      });
+    }
+
+    // Extract camera values
+    const cameraMatches = allText.match(
+      /(\d+)\s*(?:mp|megapixels?)\s*(?:camera|rear|back)/gi
+    );
+    if (cameraMatches) {
+      cameraMatches.forEach((match) => {
+        const camera = match.match(/(\d+)/)?.[1];
+        if (camera) values.push(`camera_main >= ${camera}MP`);
+      });
+    }
+
+    // Extract battery values
+    const batteryMatches = allText.match(/(\d+)\s*(?:mah|mAh|milliampere)/gi);
+    if (batteryMatches) {
+      batteryMatches.forEach((match) => {
+        const battery = match.match(/(\d+)/)?.[1];
+        if (battery) values.push(`battery >= ${battery}mAh`);
+      });
+    }
+
+    // Extract display size values
+    const displayMatches = allText.match(
+      /(\d+(?:\.\d+)?)\s*(?:inch|inches|")/gi
+    );
+    if (displayMatches) {
+      displayMatches.forEach((match) => {
+        const size = match.match(/(\d+(?:\.\d+)?)/)?.[1];
+        if (size) values.push(`display_size = ${size}"`);
+      });
+    }
+
+    // Extract OS values
+    if (allText.toLowerCase().includes("android")) values.push(`os = Android`);
+    if (allText.toLowerCase().includes("ios")) values.push(`os = iOS`);
+
+    // Extract rating values
+    const ratingMatches = allText.match(
+      /(?:rating|rated)\s*(?:above|over|more than)?\s*(\d+(?:\.\d+)?)/gi
+    );
+    if (ratingMatches) {
+      ratingMatches.forEach((match) => {
+        const rating = match.match(/(\d+(?:\.\d+)?)/)?.[1];
+        if (rating) values.push(`rating >= ${rating}`);
+      });
+    }
+
+    // Remove duplicates
+    return [...new Set(values)];
+  }
+  // Generate and execute multiple queries for comprehensive coverage
+  async generateAndExecuteMultipleQueries(
+    userQuery: string,
+    chatHistory?: ChatMessage[]
+  ): Promise<MultipleQueryResult> {
     try {
       console.log("AI Agent received user query:", userQuery);
-      console.log("Generating AI-powered Supabase query...");
+      console.log("Generating multiple AI-powered Supabase queries...");
 
-      // Use AI to generate the database query
-      const queryInfo = await this.generateAIQuery(userQuery);
+      // Use AI to generate multiple database queries
+      const queryInfo = await this.generateMultipleAIQueries(
+        userQuery,
+        chatHistory
+      );
 
-      console.log("AI Generated Query:", queryInfo.queryString);
-      console.log("Query Description:", queryInfo.description);
+      console.log(
+        "AI Generated Queries:",
+        queryInfo.queries.map((q) => q.queryString)
+      );
 
-      // Execute the query
-      const phones = await this.executeSupabaseQuery(queryInfo);
+      // Execute all queries in parallel
+      const allPhones = await this.executeMultipleSupabaseQueries(
+        queryInfo.queries
+      );
+
+      // Check if query is vague based on number of distinct database queryable values
+      // 1 value = vague (needs more specificity), 2+ values = not vague
+      const extractedValues = this.extractDatabaseQueryValues(
+        userQuery,
+        chatHistory
+      );
+      const isVague = extractedValues.length === 1;
+
+      console.log("Extracted database values:", extractedValues);
+      console.log("Is vague (1 value):", isVague);
+      const followUpSuggestions = undefined; // AI will handle vague queries intelligently
 
       return {
-        phones,
-        query: queryInfo.queryString,
-        queryDescription: queryInfo.description,
+        phones: allPhones, // Always return phones (even for vague queries - AI will show top 5)
+        queries: queryInfo.queries.map((q) => ({
+          queryString: q.queryString,
+          phonesFound: 0, // Will be updated by executeMultipleSupabaseQueries
+        })),
+        totalResults: allPhones.length,
+        isVague,
+        isAdversarial: queryInfo.isAdversarial,
+        isIrrelevant: queryInfo.isIrrelevant,
+        followUpSuggestions,
+        extractedValues, // Include extracted database values
       };
     } catch (error) {
-      console.error("AI Query generation/execution error:", error);
-      // Return empty result if AI fails
+      console.error("AI Multiple Query generation/execution error:", error);
       return {
         phones: [],
-        query: "Error generating query",
-        queryDescription: "Failed to generate query",
+        queries: [],
+        totalResults: 0,
+        isVague: false,
       };
     }
   }
 
-  private async generateAIQuery(userQuery: string): Promise<{
-    queryString: string;
-    description: string;
-    queryBuilder: any; // eslint-disable-line @typescript-eslint/no-explicit-any
+  private async generateMultipleAIQueries(
+    userQuery: string,
+    chatHistory?: ChatMessage[]
+  ): Promise<{
+    queries: Array<{
+      queryString: string;
+      description: string;
+      queryConditions: Array<{
+        field: string;
+        operator: string;
+        value: string | number | string[];
+      }>;
+    }>;
+    isAdversarial?: boolean;
+    isIrrelevant?: boolean;
   }> {
     const prompt = `
-      You are a database query expert for a mobile phone database. Generate a Supabase query based on the user's request.
+You are a database query expert for a mobile phone database. Analyze the user's query and generate MULTIPLE Supabase queries for comprehensive coverage.
 
       Database schema:
       - Table: phones
@@ -64,33 +250,73 @@ class QueryService {
       - BRAND COLUMN: Use for company names (Samsung, Apple, OnePlus, Xiaomi, Realme, Oppo, Vivo, Google)
       - MODEL COLUMN: Use for specific phone models and series (Galaxy S24, iPhone 15, Redmi Note 12, etc.)
       - SERIES DETECTION: Use regex patterns for series (S series = S + number, A series = A + number, etc.)
-      - REGEX OPERATORS: Use "regex" operator for pattern matching (e.g., "S[0-9]+" for S series)
+      - RESULT LIMITING: Each query returns max 10 phones sorted by rating (highest first)
+      - VAGUE DETECTION: Generate 1 query = vague (needs specificity), 2+ queries = not vague
+      - SMART QUERIES: Generate focused queries that return relevant phones
+      - QUALITY FOCUS: Each query shows top-rated phones for better recommendations
+
+      ${
+        chatHistory && chatHistory.length > 0
+          ? `
+      ## CHAT HISTORY CONTEXT
+      Previous conversation context:
+      ${chatHistory.map((msg) => `- ${msg.role}: ${msg.content}`).join("\n")}
+      
+      Use this context to understand what the user is looking for and generate more relevant queries.
+      `
+          : ""
+      }
 
       User Query: "${userQuery}"
 
-      Generate a JSON response with:
-      1. queryString: Human-readable description of the query
-      2. description: Brief description of what the query does
-      3. queryConditions: Array of Supabase query conditions
+First, analyze the query:
+1. Is this query about mobile phones? (yes/no)
+2. Is this query adversarial/inappropriate? (yes/no)
+3. Generate SMART Supabase database queries - only generate additional queries if they add meaningful value
 
-      Examples:
-      - "Samsung phones" → {"queryString": "Samsung phones", "description": "All Samsung phones", "queryConditions": [{"field": "brand", "operator": "ilike", "value": "%Samsung%"}]}
-      - "Samsung S series" → {"queryString": "Samsung Galaxy S series phones", "description": "Samsung Galaxy S series phones", "queryConditions": [{"field": "brand", "operator": "ilike", "value": "%Samsung%"}, {"field": "model", "operator": "regex", "value": ".*S[0-9]+.*"}]}
-      - "Galaxy A series" → {"queryString": "Samsung Galaxy A series phones", "description": "Samsung Galaxy A series phones", "queryConditions": [{"field": "brand", "operator": "ilike", "value": "%Samsung%"}, {"field": "model", "operator": "regex", "value": ".*A[0-9]+.*"}]}
-      - "iPhone S series" → {"queryString": "Apple iPhone S series phones", "description": "Apple iPhone S series phones", "queryConditions": [{"field": "brand", "operator": "ilike", "value": "%Apple%"}, {"field": "model", "operator": "regex", "value": ".*S[0-9]+.*"}]}
-      - "Redmi Note series" → {"queryString": "Xiaomi Redmi Note series phones", "description": "Xiaomi Redmi Note series phones", "queryConditions": [{"field": "brand", "operator": "ilike", "value": "%Xiaomi%"}, {"field": "model", "operator": "regex", "value": ".*Note.*[0-9]+.*"}]}
-      - "OnePlus Nord series" → {"queryString": "OnePlus Nord series phones", "description": "OnePlus Nord series phones", "queryConditions": [{"field": "brand", "operator": "ilike", "value": "%OnePlus%"}, {"field": "model", "operator": "regex", "value": ".*Nord.*"}]}
-      - "Realme GT series" → {"queryString": "Realme GT series phones", "description": "Realme GT series phones", "queryConditions": [{"field": "brand", "operator": "ilike", "value": "%Realme%"}, {"field": "model", "operator": "regex", "value": ".*GT.*"}]}
-      - "Show me Samsung phones only, under ₹25k" → {"queryString": "Samsung phones under ₹25,000", "description": "Samsung phones within budget", "queryConditions": [{"field": "brand", "operator": "ilike", "value": "%Samsung%"}, {"field": "price", "operator": "lte", "value": 25000}]}
-      - "Galaxy A series under 30k" → {"queryString": "Samsung Galaxy A series under ₹30,000", "description": "Galaxy A series budget phones", "queryConditions": [{"field": "brand", "operator": "ilike", "value": "%Samsung%"}, {"field": "model", "operator": "regex", "value": ".*A[0-9]+.*"}, {"field": "price", "operator": "lte", "value": 30000}]}
-      - "Apple phones only" → {"queryString": "Apple iPhone phones", "description": "All Apple iPhone models", "queryConditions": [{"field": "brand", "operator": "ilike", "value": "%Apple%"}]}
-      - "OnePlus phones under 40k" → {"queryString": "OnePlus phones under ₹40,000", "description": "OnePlus phones within budget", "queryConditions": [{"field": "brand", "operator": "ilike", "value": "%OnePlus%"}, {"field": "price", "operator": "lte", "value": 40000}]}
-      - "phones under 30000" → {"queryString": "Phones under ₹30,000", "description": "Budget phones under ₹30,000", "queryConditions": [{"field": "price", "operator": "lte", "value": 30000}]}
-      - "best camera phones" → {"queryString": "High-end camera phones", "description": "Phones with excellent camera specifications", "queryConditions": [{"field": "camera_main", "operator": "not.is", "value": null}]}
-      - "black phones" → {"queryString": "Black colored phones", "description": "Phones available in black color", "queryConditions": [{"field": "colours", "operator": "cs", "value": "[\"Black\"]"}]}
-      - "phones in blue or white" → {"queryString": "Blue or white colored phones", "description": "Phones available in blue or white colors", "queryConditions": [{"field": "colours", "operator": "overlaps", "value": "[\"Blue\", \"White\"]"}]}
+Generate queries intelligently based on query complexity:
+- Simple queries (e.g., "phones under 30k"): Generate 1 focused query ONLY
+- Specific queries (e.g., "Samsung phones under 30k"): Generate 1 targeted query ONLY  
+- Complex queries (e.g., "best gaming phones under 30k"): Generate 2 queries MAXIMUM
+- Comparison queries (e.g., "iPhone vs Samsung"): Generate 2 queries MAXIMUM
 
-      Respond with ONLY the JSON object, no other text.`;
+CRITICAL RULES:
+- Each query MUST be different and non-overlapping
+- Generate multiple queries ONLY when absolutely necessary
+- Each query should return < 50 phones sorted by rating if required
+- Avoid redundant or similar queries
+
+Examples of intelligent query generation:
+- Query: "phones under 30k" → Generate: ["phones under ₹30,000 with rating >= 4.0"] (1 query ONLY)
+- Query: "Samsung phones under 30k" → Generate: ["Samsung phones under ₹30,000 with rating >= 4.0"] (1 query ONLY)
+- Query: "best gaming phones under 30k" → Generate: ["phones under ₹30,000 with gaming features", "high-rated gaming phones under ₹30,000"] (2 queries MAX)
+- Query: "iPhone vs Samsung" → Generate: ["iPhone phones with rating >= 4.0", "Samsung phones with rating >= 4.0"] (2 queries MAX)
+
+IMPORTANT: Generate maximum 3 queries. Focus on quality over quantity.
+
+Respond with ONLY a JSON object:
+{
+  "isPhoneQuery": true/false,
+  "isAdversarial": true/false,
+  "queries": [
+    {
+      "queryString": "Samsung phones under ₹30,000",
+      "description": "Samsung phones within budget",
+      "queryConditions": [
+        {"field": "brand", "operator": "ilike", "value": "%Samsung%"},
+        {"field": "price", "operator": "lte", "value": 30000}
+      ]
+    },
+    {
+      "queryString": "Best Samsung phones",
+      "description": "High-rated Samsung phones",
+      "queryConditions": [
+        {"field": "brand", "operator": "ilike", "value": "%Samsung%"},
+        {"field": "rating", "operator": "gte", "value": 4.0}
+      ]
+    }
+  ]
+}`;
 
     try {
       const response = await this.genAI.models.generateContent({
@@ -103,10 +329,8 @@ class QueryService {
         throw new Error("No response from AI");
       }
 
-      // Clean and parse JSON response - handle markdown formatting
+      // Clean and parse JSON response
       let cleanedResponse = responseText;
-
-      // Remove markdown code blocks if present
       if (cleanedResponse.includes("```json")) {
         cleanedResponse = cleanedResponse
           .replace(/```json\s*/, "")
@@ -117,27 +341,108 @@ class QueryService {
           .replace(/```\s*$/, "");
       }
 
-      // Remove any leading/trailing whitespace
       cleanedResponse = cleanedResponse.trim();
-
-      // Parse JSON response
       const queryInfo = JSON.parse(cleanedResponse);
 
-      // Build Supabase query from conditions
-      let queryBuilder: any = supabase.from("phones").select("*"); // eslint-disable-line @typescript-eslint/no-explicit-any
+      // Limit queries to maximum 3 to prevent redundancy
+      const limitedQueries = (queryInfo.queries || []).slice(0, 3);
 
-      if (
-        queryInfo.queryConditions &&
-        Array.isArray(queryInfo.queryConditions)
-      ) {
-        queryInfo.queryConditions.forEach((condition: any) => {
-          // eslint-disable-line @typescript-eslint/no-explicit-any
+      return {
+        queries: limitedQueries,
+        isAdversarial: queryInfo.isAdversarial,
+        isIrrelevant: !queryInfo.isPhoneQuery,
+      };
+    } catch (error) {
+      console.error("AI Multiple Query generation failed:", error);
+      throw error;
+    }
+  }
+
+  private async executeMultipleSupabaseQueries(
+    queries: Array<{
+      queryString: string;
+      description: string;
+      queryConditions: Array<{
+        field: string;
+        operator: string;
+        value: string | number | string[];
+      }>;
+    }>
+  ): Promise<Phone[]> {
+    try {
+      if (!queries || queries.length === 0) {
+        return [];
+      }
+
+      console.log(
+        `Executing ${queries.length} queries in parallel:`,
+        queries.map((q) => q.queryString)
+      );
+
+      // Execute all queries in parallel
+      const queryPromises = queries.map((query) =>
+        this.executeSupabaseQueryFromConditions(query.queryConditions)
+      );
+
+      const queryResults = await Promise.all(queryPromises);
+
+      // Combine results and remove duplicates
+      const allPhones: Phone[] = [];
+      const seenPhones = new Set<string>();
+
+      queryResults.forEach((phones, _index) => {
+        console.log(
+          ` Query ${_index + 1} (${queries[_index].queryString}): ${
+            phones.length
+          } phones found`
+        );
+
+        phones.forEach((phone) => {
+          const phoneKey = `${phone.brand}-${phone.model}-${phone.price}`;
+          if (!seenPhones.has(phoneKey)) {
+            seenPhones.add(phoneKey);
+            allPhones.push(phone);
+          }
+        });
+      });
+
+      return allPhones;
+    } catch (error) {
+      console.error("Error executing multiple queries:", error);
+      return [];
+    }
+  }
+
+  private async executeSupabaseQueryFromConditions(
+    conditions: Array<{
+      field: string;
+      operator: string;
+      value: string | number | string[];
+    }>
+  ): Promise<Phone[]> {
+    try {
+      let queryBuilder = supabase.from("phones").select("*");
+
+      if (conditions && Array.isArray(conditions)) {
+        conditions.forEach((condition) => {
           switch (condition.operator) {
             case "ilike":
-              queryBuilder = queryBuilder.ilike(
-                condition.field,
-                condition.value
-              );
+              // Check if field is an array type - use different operator
+              if (
+                condition.field === "colours" ||
+                condition.field === "camera_features" ||
+                condition.field === "sensors"
+              ) {
+                // For array fields, use overlaps operator instead of ilike
+                queryBuilder = queryBuilder.overlaps(condition.field, [
+                  String(condition.value),
+                ]);
+              } else {
+                queryBuilder = queryBuilder.ilike(
+                  condition.field,
+                  String(condition.value)
+                );
+              }
               break;
             case "eq":
               queryBuilder = queryBuilder.eq(condition.field, condition.value);
@@ -156,330 +461,207 @@ class QueryService {
               );
               break;
             case "cs":
-              queryBuilder = queryBuilder.cs(condition.field, condition.value);
+              queryBuilder = queryBuilder.contains(
+                condition.field,
+                condition.value as string[]
+              );
               break;
             case "overlaps":
               queryBuilder = queryBuilder.overlaps(
                 condition.field,
-                condition.value
+                condition.value as string[]
               );
               break;
             case "regex":
               // Convert regex pattern to ilike pattern for Supabase compatibility
-              let ilikePattern = condition.value;
-
-              // Samsung Galaxy Series
-              if (condition.value.includes("S[0-9]+")) {
-                ilikePattern = "%S%"; // Galaxy S series (S24, S23, etc.)
-              } else if (condition.value.includes("A[0-9]+")) {
-                ilikePattern = "%A%"; // Galaxy A series (A54, A34, etc.)
-              } else if (condition.value.includes("M[0-9]+")) {
-                ilikePattern = "%M%"; // Galaxy M series (M34, M14, etc.)
-              } else if (condition.value.includes("F[0-9]+")) {
-                ilikePattern = "%F%"; // Galaxy F series (F54, F34, etc.)
-              } else if (condition.value.includes("Note")) {
-                ilikePattern = "%Note%"; // Galaxy Note series
-              } else if (condition.value.includes("Z[0-9]+")) {
-                ilikePattern = "%Z%"; // Galaxy Z series (foldables)
-
-                // iPhone Series
-              } else if (condition.value.includes("iPhone.*Pro")) {
-                ilikePattern = "%Pro%"; // iPhone Pro series
-              } else if (condition.value.includes("iPhone.*Plus")) {
-                ilikePattern = "%Plus%"; // iPhone Plus series
-              } else if (condition.value.includes("iPhone.*Max")) {
-                ilikePattern = "%Max%"; // iPhone Max series
-              } else if (condition.value.includes("iPhone.*SE")) {
-                ilikePattern = "%SE%"; // iPhone SE series
-              } else if (condition.value.includes("iPhone.*Mini")) {
-                ilikePattern = "%Mini%"; // iPhone Mini series
-
-                // OnePlus Series
-              } else if (condition.value.includes("Nord")) {
-                ilikePattern = "%Nord%"; // OnePlus Nord series
-              } else if (condition.value.includes("Ace")) {
-                ilikePattern = "%Ace%"; // OnePlus Ace series
-              } else if (condition.value.includes("CE")) {
-                ilikePattern = "%CE%"; // OnePlus CE series
-
-                // Xiaomi/Redmi Series
-              } else if (condition.value.includes("Redmi.*Note")) {
-                ilikePattern = "%Note%"; // Redmi Note series
-              } else if (condition.value.includes("Redmi.*K")) {
-                ilikePattern = "%K%"; // Redmi K series
-              } else if (condition.value.includes("Redmi.*A")) {
-                ilikePattern = "%A%"; // Redmi A series
-              } else if (condition.value.includes("POCO.*X")) {
-                ilikePattern = "%X%"; // POCO X series
-              } else if (condition.value.includes("POCO.*F")) {
-                ilikePattern = "%F%"; // POCO F series
-              } else if (condition.value.includes("POCO.*M")) {
-                ilikePattern = "%M%"; // POCO M series
-              } else if (condition.value.includes("Mi.*Note")) {
-                ilikePattern = "%Note%"; // Mi Note series
-              } else if (condition.value.includes("Mi.*Max")) {
-                ilikePattern = "%Max%"; // Mi Max series
-
-                // Oppo Series
-              } else if (condition.value.includes("Reno")) {
-                ilikePattern = "%Reno%"; // Oppo Reno series
-              } else if (condition.value.includes("Find")) {
-                ilikePattern = "%Find%"; // Oppo Find series
-              } else if (condition.value.includes("A[0-9]+")) {
-                ilikePattern = "%A%"; // Oppo A series
-              } else if (condition.value.includes("F[0-9]+")) {
-                ilikePattern = "%F%"; // Oppo F series
-              } else if (condition.value.includes("K[0-9]+")) {
-                ilikePattern = "%K%"; // Oppo K series
-
-                // Vivo Series
-              } else if (condition.value.includes("V[0-9]+")) {
-                ilikePattern = "%V%"; // Vivo V series
-              } else if (condition.value.includes("X[0-9]+")) {
-                ilikePattern = "%X%"; // Vivo X series
-              } else if (condition.value.includes("Y[0-9]+")) {
-                ilikePattern = "%Y%"; // Vivo Y series
-              } else if (condition.value.includes("S[0-9]+")) {
-                ilikePattern = "%S%"; // Vivo S series
-              } else if (condition.value.includes("T[0-9]+")) {
-                ilikePattern = "%T%"; // Vivo T series
-              } else if (condition.value.includes("Z[0-9]+")) {
-                ilikePattern = "%Z%"; // Vivo Z series
-
-                // Realme Series
-              } else if (condition.value.includes("GT")) {
-                ilikePattern = "%GT%"; // Realme GT series
-              } else if (condition.value.includes("Narzo")) {
-                ilikePattern = "%Narzo%"; // Realme Narzo series
-              } else if (condition.value.includes("C[0-9]+")) {
-                ilikePattern = "%C%"; // Realme C series
-              } else if (condition.value.includes("Number")) {
-                ilikePattern = "%Number%"; // Realme Number series
-
-                // Google Pixel Series
-              } else if (condition.value.includes("Pixel.*Pro")) {
-                ilikePattern = "%Pro%"; // Pixel Pro series
-              } else if (condition.value.includes("Pixel.*a")) {
-                ilikePattern = "%a%"; // Pixel a series
-
-                // Motorola Series
-              } else if (condition.value.includes("Edge")) {
-                ilikePattern = "%Edge%"; // Motorola Edge series
-              } else if (condition.value.includes("G[0-9]+")) {
-                ilikePattern = "%G%"; // Motorola G series
-              } else if (condition.value.includes("E[0-9]+")) {
-                ilikePattern = "%E%"; // Motorola E series
-
-                // Nothing Series
-              } else if (condition.value.includes("Nothing.*Phone")) {
-                ilikePattern = "%Phone%"; // Nothing Phone series
-
-                // iQOO Series
-              } else if (condition.value.includes("iQOO.*Z")) {
-                ilikePattern = "%Z%"; // iQOO Z series
-              } else if (condition.value.includes("iQOO.*Neo")) {
-                ilikePattern = "%Neo%"; // iQOO Neo series
-              } else if (condition.value.includes("iQOO.*Pro")) {
-                ilikePattern = "%Pro%"; // iQOO Pro series
-
-                // Infinix Series
-              } else if (condition.value.includes("Infinix.*Note")) {
-                ilikePattern = "%Note%"; // Infinix Note series
-              } else if (condition.value.includes("Infinix.*Hot")) {
-                ilikePattern = "%Hot%"; // Infinix Hot series
-              } else if (condition.value.includes("Infinix.*Zero")) {
-                ilikePattern = "%Zero%"; // Infinix Zero series
-
-                // Tecno Series
-              } else if (condition.value.includes("Tecno.*Spark")) {
-                ilikePattern = "%Spark%"; // Tecno Spark series
-              } else if (condition.value.includes("Tecno.*Camon")) {
-                ilikePattern = "%Camon%"; // Tecno Camon series
-              } else if (condition.value.includes("Tecno.*Phantom")) {
-                ilikePattern = "%Phantom%"; // Tecno Phantom series
-
-                // Lava Series
-              } else if (condition.value.includes("Lava.*Agni")) {
-                ilikePattern = "%Agni%"; // Lava Agni series
-              } else if (condition.value.includes("Lava.*Blaze")) {
-                ilikePattern = "%Blaze%"; // Lava Blaze series
-
-                // Generic patterns
-              } else if (condition.value.includes("Pro")) {
-                ilikePattern = "%Pro%"; // Any Pro series
-              } else if (condition.value.includes("Plus")) {
-                ilikePattern = "%Plus%"; // Any Plus series
-              } else if (condition.value.includes("Max")) {
-                ilikePattern = "%Max%"; // Any Max series
-              } else if (condition.value.includes("Mini")) {
-                ilikePattern = "%Mini%"; // Any Mini series
-              } else if (condition.value.includes("SE")) {
-                ilikePattern = "%SE%"; // Any SE series
-              } else if (condition.value.includes("Ultra")) {
-                ilikePattern = "%Ultra%"; // Any Ultra series
-              } else if (condition.value.includes("Lite")) {
-                ilikePattern = "%Lite%"; // Any Lite series
-              } else if (condition.value.includes("Neo")) {
-                ilikePattern = "%Neo%"; // Any Neo series
-              } else {
-                // Fallback: remove regex syntax and use as-is
-                ilikePattern = condition.value.replace(
-                  /[.*+?^${}()|[\]\\]/g,
-                  "%"
-                );
-              }
+              let ilikePattern = String(condition.value);
+              ilikePattern = this.convertRegexToIlike(ilikePattern);
               queryBuilder = queryBuilder.ilike(condition.field, ilikePattern);
               break;
           }
         });
       }
 
-      return {
-        queryString: queryInfo.queryString || "AI Generated Query",
-        description: queryInfo.description || "AI Generated Description",
-        queryBuilder,
-      };
-    } catch (error) {
-      console.error("AI Query generation failed:", error);
-      throw error;
-    }
-  }
-
-  private async executeSupabaseQuery(queryInfo: {
-    queryBuilder: any; // eslint-disable-line @typescript-eslint/no-explicit-any
-    description: string;
-  }): Promise<Phone[]> {
-    try {
-      console.log("AI Agent executing Supabase query:");
-      console.log("Query Description:", queryInfo.description);
-      console.log("Query Builder:", queryInfo.queryBuilder);
-      console.log("Execution Time:", new Date().toISOString());
-
-      const { data, error } = await queryInfo.queryBuilder;
-
+      const { data, error } = await queryBuilder
+        .order("rating", { ascending: false })
+        .limit(10); // Sort by rating (highest first) and limit to 10 results per query
       if (error) {
-        console.error(" Supabase query error:", error);
-        console.log(" Failed Query Details:", {
-          description: queryInfo.description,
-          error: error.message,
-          code: error.code,
-          details: error.details,
-          hint: error.hint,
-        });
+        console.error("Query execution error:", error);
         return [];
       }
 
-      console.log("Query executed successfully!");
-      console.log("Results found:", data?.length || 0, "phones");
-
-      // If no results found, let's check what's available in the database
-      if (!data || data.length === 0) {
-        console.log("No results found. Checking database contents...");
-        await this.debugDatabaseContents(queryInfo.description);
-      }
-
-      console.log("Query completed at:", new Date().toISOString());
-      console.log("========================================");
-
       return data || [];
     } catch (error) {
-      console.error("Query execution error:", error);
-      console.log("Error Details:", {
-        description: queryInfo.description,
-        error: error instanceof Error ? error.message : String(error),
-        stack: error instanceof Error ? error.stack : undefined,
-      });
-      console.log("========================================");
+      console.error("Error executing query:", error);
       return [];
     }
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  private async debugDatabaseContents(
-    _queryDescription: string
-  ): Promise<void> {
-    try {
-      // Check total phones count
-      const { count: totalCount } = await supabase
-        .from("phones")
-        .select("*", { count: "exact", head: true });
-
-      console.log(`Total phones in database: ${totalCount}`);
-
-      // Check Samsung phones specifically
-      const { data: samsungPhones } = await supabase
-        .from("phones")
-        .select("brand, model, price")
-        .ilike("brand", "%Samsung%")
-        .order("price", { ascending: true });
-
-      console.log(`Samsung phones found: ${samsungPhones?.length || 0}`);
-      if (samsungPhones && samsungPhones.length > 0) {
-        console.log("Samsung phones:", samsungPhones.slice(0, 5));
-      }
-
-      // Check phones under 25k
-      const { data: phonesUnder25k } = await supabase
-        .from("phones")
-        .select("brand, model, price")
-        .lt("price", 25000)
-        .order("price", { ascending: true });
-
-      console.log(`Phones under ₹25k: ${phonesUnder25k?.length || 0}`);
-      if (phonesUnder25k && phonesUnder25k.length > 0) {
-        console.log("Phones under ₹25k:", phonesUnder25k.slice(0, 5));
-      }
-
-      // Check all brands
-      const { data: allBrands } = await supabase
-        .from("phones")
-        .select("brand")
-        .order("brand");
-
-      if (allBrands) {
-        const uniqueBrands = [...new Set(allBrands.map((p) => p.brand))];
-        console.log("Available brands:", uniqueBrands);
-      }
-    } catch (error) {
-      console.error("Debug query failed:", error);
+  private convertRegexToIlike(regexPattern: string): string {
+    // Samsung Galaxy Series
+    if (regexPattern.includes("S[0-9]+")) {
+      return "%S%"; // Galaxy S series (S24, S23, etc.)
+    } else if (regexPattern.includes("A[0-9]+")) {
+      return "%A%"; // Galaxy A series (A54, A34, etc.)
+    } else if (regexPattern.includes("M[0-9]+")) {
+      return "%M%"; // Galaxy M series (M34, M14, etc.)
+    } else if (regexPattern.includes("F[0-9]+")) {
+      return "%F%"; // Galaxy F series (F54, F34, etc.)
+    } else if (regexPattern.includes("Note")) {
+      return "%Note%"; // Galaxy Note series
+    } else if (regexPattern.includes("Z[0-9]+")) {
+      return "%Z%"; // Galaxy Z series (foldables)
+    }
+    // iPhone Series
+    else if (regexPattern.includes("iPhone.*Pro")) {
+      return "%Pro%"; // iPhone Pro series
+    } else if (regexPattern.includes("iPhone.*Plus")) {
+      return "%Plus%"; // iPhone Plus series
+    } else if (regexPattern.includes("iPhone.*Max")) {
+      return "%Max%"; // iPhone Max series
+    } else if (regexPattern.includes("iPhone.*SE")) {
+      return "%SE%"; // iPhone SE series
+    } else if (regexPattern.includes("iPhone.*Mini")) {
+      return "%Mini%"; // iPhone Mini series
+    }
+    // OnePlus Series
+    else if (regexPattern.includes("Nord")) {
+      return "%Nord%"; // OnePlus Nord series
+    } else if (regexPattern.includes("Ace")) {
+      return "%Ace%"; // OnePlus Ace series
+    } else if (regexPattern.includes("CE")) {
+      return "%CE%"; // OnePlus CE series
+    }
+    // Xiaomi/Redmi Series
+    else if (regexPattern.includes("Redmi.*Note")) {
+      return "%Note%"; // Redmi Note series
+    } else if (regexPattern.includes("Redmi.*K")) {
+      return "%K%"; // Redmi K series
+    } else if (regexPattern.includes("Redmi.*A")) {
+      return "%A%"; // Redmi A series
+    } else if (regexPattern.includes("POCO.*X")) {
+      return "%X%"; // POCO X series
+    } else if (regexPattern.includes("POCO.*F")) {
+      return "%F%"; // POCO F series
+    } else if (regexPattern.includes("POCO.*M")) {
+      return "%M%"; // POCO M series
+    } else if (regexPattern.includes("Mi.*Note")) {
+      return "%Note%"; // Mi Note series
+    } else if (regexPattern.includes("Mi.*Max")) {
+      return "%Max%"; // Mi Max series
+    }
+    // Oppo Series
+    else if (regexPattern.includes("Reno")) {
+      return "%Reno%"; // Oppo Reno series
+    } else if (regexPattern.includes("Find")) {
+      return "%Find%"; // Oppo Find series
+    } else if (regexPattern.includes("A[0-9]+")) {
+      return "%A%"; // Oppo A series
+    } else if (regexPattern.includes("F[0-9]+")) {
+      return "%F%"; // Oppo F series
+    } else if (regexPattern.includes("K[0-9]+")) {
+      return "%K%"; // Oppo K series
+    }
+    // Vivo Series
+    else if (regexPattern.includes("V[0-9]+")) {
+      return "%V%"; // Vivo V series
+    } else if (regexPattern.includes("X[0-9]+")) {
+      return "%X%"; // Vivo X series
+    } else if (regexPattern.includes("Y[0-9]+")) {
+      return "%Y%"; // Vivo Y series
+    } else if (regexPattern.includes("S[0-9]+")) {
+      return "%S%"; // Vivo S series
+    } else if (regexPattern.includes("T[0-9]+")) {
+      return "%T%"; // Vivo T series
+    } else if (regexPattern.includes("Z[0-9]+")) {
+      return "%Z%"; // Vivo Z series
+    }
+    // Realme Series
+    else if (regexPattern.includes("GT")) {
+      return "%GT%"; // Realme GT series
+    } else if (regexPattern.includes("Narzo")) {
+      return "%Narzo%"; // Realme Narzo series
+    } else if (regexPattern.includes("C[0-9]+")) {
+      return "%C%"; // Realme C series
+    } else if (regexPattern.includes("Number")) {
+      return "%Number%"; // Realme Number series
+    }
+    // Google Pixel Series
+    else if (regexPattern.includes("Pixel.*Pro")) {
+      return "%Pro%"; // Pixel Pro series
+    } else if (regexPattern.includes("Pixel.*a")) {
+      return "%a%"; // Pixel a series
+    }
+    // Motorola Series
+    else if (regexPattern.includes("Edge")) {
+      return "%Edge%"; // Motorola Edge series
+    } else if (regexPattern.includes("G[0-9]+")) {
+      return "%G%"; // Motorola G series
+    } else if (regexPattern.includes("E[0-9]+")) {
+      return "%E%"; // Motorola E series
+    }
+    // Nothing Series
+    else if (regexPattern.includes("Nothing.*Phone")) {
+      return "%Phone%"; // Nothing Phone series
+    }
+    // iQOO Series
+    else if (regexPattern.includes("iQOO.*Z")) {
+      return "%Z%"; // iQOO Z series
+    } else if (regexPattern.includes("iQOO.*Neo")) {
+      return "%Neo%"; // iQOO Neo series
+    } else if (regexPattern.includes("iQOO.*Pro")) {
+      return "%Pro%"; // iQOO Pro series
+    }
+    // Infinix Series
+    else if (regexPattern.includes("Infinix.*Note")) {
+      return "%Note%"; // Infinix Note series
+    } else if (regexPattern.includes("Infinix.*Hot")) {
+      return "%Hot%"; // Infinix Hot series
+    } else if (regexPattern.includes("Infinix.*Zero")) {
+      return "%Zero%"; // Infinix Zero series
+    }
+    // Tecno Series
+    else if (regexPattern.includes("Tecno.*Spark")) {
+      return "%Spark%"; // Tecno Spark series
+    } else if (regexPattern.includes("Tecno.*Camon")) {
+      return "%Camon%"; // Tecno Camon series
+    } else if (regexPattern.includes("Tecno.*Phantom")) {
+      return "%Phantom%"; // Tecno Phantom series
+    }
+    // Lava Series
+    else if (regexPattern.includes("Lava.*Agni")) {
+      return "%Agni%"; // Lava Agni series
+    } else if (regexPattern.includes("Lava.*Blaze")) {
+      return "%Blaze%"; // Lava Blaze series
+    }
+    // Generic patterns
+    else if (regexPattern.includes("Pro")) {
+      return "%Pro%"; // Any Pro series
+    } else if (regexPattern.includes("Plus")) {
+      return "%Plus%"; // Any Plus series
+    } else if (regexPattern.includes("Max")) {
+      return "%Max%"; // Any Max series
+    } else if (regexPattern.includes("Mini")) {
+      return "%Mini%"; // Any Mini series
+    } else if (regexPattern.includes("SE")) {
+      return "%SE%"; // Any SE series
+    } else if (regexPattern.includes("Ultra")) {
+      return "%Ultra%"; // Any Ultra series
+    } else if (regexPattern.includes("Lite")) {
+      return "%Lite%"; // Any Lite series
+    } else if (regexPattern.includes("Neo")) {
+      return "%Neo%"; // Any Neo series
+    } else {
+      // Fallback: remove regex syntax and use as-is
+      return regexPattern.replace(/[.*+?^${}()|[\]\\]/g, "%");
     }
   }
 
-  // Method to get database schema for AI context
-  getDatabaseSchema(): string {
-    return `
-    Database Schema: phones table
-
-    Table: phones
-    Columns:
-    - id: number (primary key)
-    - brand: string (e.g., "Samsung", "Apple", "OnePlus")
-    - model: string (e.g., "Galaxy S24", "iPhone 15")
-    - price: number (in INR)
-    - release_year: number (e.g., 2024)
-    - os: string (e.g., "Android", "iOS")
-    - ram: string (e.g., "8GB", "12GB")
-    - storage: string (e.g., "128GB", "256GB")
-    - display_type: string (e.g., "AMOLED", "LCD")
-    - display_size: string (e.g., "6.1 inches")
-    - resolution: string (e.g., "1080x2400")
-    - refresh_rate: number (e.g., 120)
-    - camera_main: string (e.g., "50MP")
-    - camera_front: string (e.g., "12MP")
-    - camera_features: string[] (e.g., ["OIS", "Night Mode"])
-    - battery: string (e.g., "4000mAh")
-    - charging: string (e.g., "65W Fast Charging")
-    - processor: string (e.g., "Snapdragon 8 Gen 3")
-    - connectivity: string[] (e.g., ["5G", "WiFi 6"])
-    - sensors: string[] (e.g., ["Fingerprint", "Face ID"])
-    - features: string[] (e.g., ["Wireless Charging", "Water Resistant"])
-    - weight: string (e.g., "180g")
-    - dimensions: string (e.g., "150x70x8mm")
-    - rating: number (1-5)
-    - stock_status: string (e.g., "In Stock", "Out of Stock")
-    - category: string (e.g., "Flagship", "Mid-range", "Budget")
-    - colours: string[] (e.g., ["Black", "White", "Blue"])
-    `;
+  // Check if query is vague based on result count
+  private isQueryVague(resultCount: number): boolean {
+    // If more than 50 phones are returned, consider the query vague
+    // and ask follow-up questions instead of showing results
+    return resultCount > 50;
   }
 }
 

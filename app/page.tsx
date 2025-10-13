@@ -48,113 +48,117 @@ export default function Home() {
   const [isSwitchingConversation, setIsSwitchingConversation] = useState(false);
   const [hasUserMadeChanges, setHasUserMadeChanges] = useState(false);
 
-  const saveCurrentChatToDatabase = useCallback(async () => {
-    console.log(" saveCurrentChatToDatabase called");
-    console.log(" User:", !!user);
-    console.log(" Messages count:", messages.length);
-    console.log(" Current conversation ID:", currentConversationId);
-    console.log(" Is switching conversation:", isSwitchingConversation);
+  const saveCurrentChatToDatabase = useCallback(
+    async (forceSave: boolean = false) => {
+      console.log(" saveCurrentChatToDatabase called");
+      console.log(" Force save:", forceSave);
+      console.log(" User:", !!user);
+      console.log(" Messages count:", messages.length);
+      console.log(" Current conversation ID:", currentConversationId);
+      console.log(" Is switching conversation:", isSwitchingConversation);
 
-    if (!user || messages.length === 0) {
-      console.log(" Skipping save - no user or no messages");
-      return;
-    }
-
-    // Don't save if we're in the middle of switching conversations
-    if (isSwitchingConversation) {
-      console.log(" Skipping save - currently switching conversations");
-      return;
-    }
-
-    // Check if user has made any changes
-    if (!hasUserMadeChanges) {
-      console.log("Skipping save - no changes made by user");
-      return;
-    }
-
-    console.log(
-      " User changes detected - proceeding with delete-and-recreate save..."
-    );
-
-    try {
-      console.log(" Starting delete-and-recreate save...");
-
-      // If we have an existing conversation, delete it first
-      if (currentConversationId) {
-        console.log(
-          " Deleting existing conversation:",
-          currentConversationId
-        );
-        const deleted = await authService.deleteConversation(
-          currentConversationId
-        );
-        if (!deleted) {
-          console.error("Failed to delete existing conversation");
-          return;
-        }
-      }
-
-      // Create new conversation with fresh timestamp
-      console.log("Creating new conversation...");
-      const conversation = await authService.createConversation();
-      if (!conversation) {
-        console.error(" Failed to create new conversation");
+      if (!user || messages.length === 0) {
+        console.log(" Skipping save - no user or no messages");
         return;
       }
 
-      const newConversationId = conversation.id;
-      setCurrentConversationId(newConversationId);
-      console.log(" Created new conversation:", newConversationId);
-
-      // Save all messages to the new conversation
-      for (const message of messages) {
-        console.log(
-          "Saving message:",
-          message.role,
-          message.content.substring(0, 50)
-        );
-        await authService.saveMessage(
-          newConversationId,
-          message.role,
-          message.content
-        );
+      // Don't save if we're in the middle of switching conversations
+      if (isSwitchingConversation) {
+        console.log(" Skipping save - currently switching conversations");
+        return;
       }
 
-      // Set conversation title with timestamp
-      const firstUserMessage = messages.find((msg) => msg.role === "user");
-      if (firstUserMessage) {
-        const title =
-          firstUserMessage.content.length > 50
-            ? firstUserMessage.content.substring(0, 50) + "..."
-            : firstUserMessage.content;
-
-        // Add timestamp to make title unique
-        const uniqueTitle = `${title} (${new Date().toLocaleString()})`;
-        console.log("Generated unique title:", uniqueTitle);
-        await authService.updateConversationTitle(
-          newConversationId,
-          uniqueTitle
-        );
+      // Check if user has made any changes (unless forceSave is true)
+      if (!forceSave && !hasUserMadeChanges) {
+        console.log("Skipping save - no changes made by user");
+        return;
       }
 
       console.log(
-        "Conversation saved with delete-and-recreate approach:",
-        newConversationId
+        " User changes detected - proceeding with delete-and-recreate save..."
       );
 
-      // Reset the changes flag since we've saved
-      setHasUserMadeChanges(false);
-      console.log("Changes flag reset");
-    } catch (error) {
-      console.error("Error saving current chat:", error);
-    }
-  }, [
-    user,
-    messages,
-    currentConversationId,
-    isSwitchingConversation,
-    hasUserMadeChanges,
-  ]);
+      try {
+        console.log(" Starting delete-and-recreate save...");
+
+        // If we have an existing conversation, delete it first
+        if (currentConversationId) {
+          console.log(
+            " Deleting existing conversation:",
+            currentConversationId
+          );
+          const deleted = await authService.deleteConversation(
+            currentConversationId
+          );
+          if (!deleted) {
+            console.error("Failed to delete existing conversation");
+            return;
+          }
+        }
+
+        // Create new conversation with fresh timestamp
+        console.log("Creating new conversation...");
+        const conversation = await authService.createConversation();
+        if (!conversation) {
+          console.error(" Failed to create new conversation");
+          return;
+        }
+
+        const newConversationId = conversation.id;
+        setCurrentConversationId(newConversationId);
+        console.log(" Created new conversation:", newConversationId);
+
+        // Save all messages to the new conversation
+        for (const message of messages) {
+          console.log(
+            "Saving message:",
+            message.role,
+            message.content.substring(0, 50)
+          );
+          await authService.saveMessage(
+            newConversationId,
+            message.role,
+            message.content
+          );
+        }
+
+        // Set conversation title with timestamp
+        const firstUserMessage = messages.find((msg) => msg.role === "user");
+        if (firstUserMessage) {
+          const title =
+            firstUserMessage.content.length > 50
+              ? firstUserMessage.content.substring(0, 50) + "..."
+              : firstUserMessage.content;
+
+          // Add timestamp to make title unique
+          const uniqueTitle = `${title} (${new Date().toLocaleString()})`;
+          console.log("Generated unique title:", uniqueTitle);
+          await authService.updateConversationTitle(
+            newConversationId,
+            uniqueTitle
+          );
+        }
+
+        console.log(
+          "Conversation saved with delete-and-recreate approach:",
+          newConversationId
+        );
+
+        // Reset the changes flag since we've saved
+        setHasUserMadeChanges(false);
+        console.log("Changes flag reset");
+      } catch (error) {
+        console.error("Error saving current chat:", error);
+      }
+    },
+    [
+      user,
+      messages,
+      currentConversationId,
+      isSwitchingConversation,
+      hasUserMadeChanges,
+    ]
+  );
 
   const checkAuthStatus = () => {
     const currentUser = authService.getCurrentUserSync();
@@ -262,6 +266,7 @@ export default function Home() {
     );
     console.log(" Current state - messages count:", messages.length);
     console.log(" Current state - hasUserMadeChanges:", hasUserMadeChanges);
+    console.log(" Current state - isLoading:", isLoading);
 
     // Prevent duplicate calls for the same conversation or while loading
     if (currentConversationId === conversationId || isLoadingConversation) {
@@ -269,10 +274,17 @@ export default function Home() {
       return;
     }
 
-    // If we have a new chat with changes, save it first before loading history
-    if (hasUserMadeChanges && messages.length > 0) {
-      console.log(" Saving current new chat before loading history...");
-      await saveCurrentChatToDatabase();
+    // Don't allow switching while AI is generating a response
+    if (isLoading) {
+      console.log("Cannot switch chats while AI is responding. Please wait...");
+      return;
+    }
+
+    // If we have messages and a current conversation, save it first before loading history
+    // (forceSave=true to ensure streaming responses are persisted even if hasUserMadeChanges is false)
+    if (messages.length > 0 && currentConversationId) {
+      console.log(" Saving current chat before switching...");
+      await saveCurrentChatToDatabase(true); // Force save to capture any streaming responses
     }
 
     setIsLoadingConversation(true);
@@ -455,6 +467,7 @@ export default function Home() {
     };
 
     setMessages((prev) => [...prev, userMessage]);
+    setHasUserMadeChanges(true); // Mark that user made changes
 
     // Save user message to database if signed in
     if (user && conversationId) {
@@ -501,7 +514,12 @@ export default function Home() {
         const stream = aiService.generateStreamingResponse(
           currentInput,
           allPhones,
-          messages.map((msg) => ({ role: msg.role, content: msg.content }))
+          messages.map((msg) => ({
+            id: msg.id,
+            role: msg.role,
+            content: msg.content,
+            timestamp: msg.timestamp.getTime(),
+          }))
         );
 
         let fullResponse = "";
@@ -611,7 +629,12 @@ export default function Home() {
         const stream = aiService.generateStreamingResponse(
           userMessageContent,
           phones.length > 0 ? phones : [],
-          messages.map((msg) => ({ role: msg.role, content: msg.content }))
+          messages.map((msg) => ({
+            id: msg.id,
+            role: msg.role,
+            content: msg.content,
+            timestamp: msg.timestamp.getTime(),
+          }))
         );
 
         let fullResponse = "";
@@ -729,7 +752,12 @@ export default function Home() {
         const stream = aiService.generateStreamingResponse(
           currentInput,
           phones.length > 0 ? phones : [],
-          messages.map((msg) => ({ role: msg.role, content: msg.content }))
+          messages.map((msg) => ({
+            id: msg.id,
+            role: msg.role,
+            content: msg.content,
+            timestamp: msg.timestamp.getTime(),
+          }))
         );
 
         let fullResponse = "";
@@ -889,8 +917,10 @@ export default function Home() {
           messageContent,
           phones.length > 0 ? phones : [],
           messageHistory.map((msg) => ({
+            id: msg.id,
             role: msg.role,
             content: msg.content,
+            timestamp: msg.timestamp.getTime(),
           }))
         );
 
@@ -974,6 +1004,7 @@ export default function Home() {
     };
 
     setMessages((prev) => [...prev, userMessage]);
+    setHasUserMadeChanges(true); // Mark that user made changes
     const currentInput = promptText; // Store the prompt text
     setInputMessage(""); // Clear the input field after sending
     setIsLoading(true);
@@ -1000,7 +1031,12 @@ export default function Home() {
         const stream = aiService.generateStreamingResponse(
           currentInput,
           allPhones,
-          messages.map((msg) => ({ role: msg.role, content: msg.content }))
+          messages.map((msg) => ({
+            id: msg.id,
+            role: msg.role,
+            content: msg.content,
+            timestamp: msg.timestamp.getTime(),
+          }))
         );
 
         let fullResponse = "";
